@@ -174,12 +174,12 @@ module Make(Backend: Irmin.S_MAKER)(Clock: CLOCK)(Time: TIME) = struct
   (* module T =
      Inds_table.Make(Nat_table.Key)(Nat_table.Entry)(Irmin.Path.String_list) *)
   module T = Irmin_store
-  module I = Irmin.Basic (Backend)(T)
+  module I = Backend(T)(Irmin.Ref.String)(Irmin.Hash.SHA1)
 
   let owner = "friendly natbot"
 
   type t = {
-    config: Irmin.config;
+    repo: I.Repo.t;
     store: (string -> I.t);
   }
 
@@ -194,7 +194,7 @@ module Make(Backend: Irmin.S_MAKER)(Clock: CLOCK)(Time: TIME) = struct
     I.head (t.store "Nat_lookup.tick: starting expiry") >>= function
     | None -> Time.sleep expiry_check_interval >>= tick t (* nothing to expire! *)
     | Some head ->
-      I.of_head t.config (task ()) head >>= fun our_br ->
+      I.of_commit_id (task ()) head t.repo >>= fun our_br ->
       let now = Clock.now () |> Int64.to_int in
       let unwrap (Nat_table.Entry.Confirmed (time, entry)) = Lwt.return time in
       let expire key value_thread =
@@ -209,9 +209,10 @@ module Make(Backend: Irmin.S_MAKER)(Clock: CLOCK)(Time: TIME) = struct
       Time.sleep expiry_check_interval >>= tick t
 
   let empty config =
-    I.create config (task ()) >>= fun store ->
+    I.Repo.create config >>= fun repo ->
+    I.master (task ()) repo >>= fun store ->
     let t = {
-      config;
+      repo;
       store;
     } in
     Lwt.async (tick t);
@@ -240,8 +241,8 @@ module Make(Backend: Irmin.S_MAKER)(Clock: CLOCK)(Time: TIME) = struct
     in
     let get_branch () =
       I.head (t.store "insert: get temp branch") >>= function
-      | Some head -> I.of_head t.config (task ()) head
-      | None -> I.empty t.config (task ())
+      | Some head -> I.of_commit_id (task ()) head t.repo
+      | None -> I.empty (task ()) t.repo
     in
     get_branch () >>= fun branch ->
     check branch proto mappings.internal_lookup >>= fun internal_mem ->
@@ -267,7 +268,7 @@ module Make(Backend: Irmin.S_MAKER)(Clock: CLOCK)(Time: TIME) = struct
     I.head (t.store "delete: get temp branch") >>= function
     | None -> Lwt.return t (* nothing in there to delete *)
     | Some head ->
-      I.of_head t.config (task ()) head >>= fun branch ->
+      I.of_commit_id (task ()) head t.repo >>= fun branch ->
       I.remove (t.store "delete: remove internal entry")
         (make_path (make_key proto internal_lookup)) >>= fun () ->
       I.remove (t.store "delete: remove external entry")
